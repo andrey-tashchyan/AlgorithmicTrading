@@ -132,7 +132,7 @@ def takeprofit(cur_pos, entry_price, close_price, stoploss, seuil1=0.05, seuil2=
 
 
 #--------------------------MACD
-def macd(closed_price, period_1 = 4, period_2 = 8):
+def macd(closed_price, period_1 = 4, period_2 = 6):
 
     print("------ Computing MACD indicator...")
     
@@ -140,7 +140,7 @@ def macd(closed_price, period_1 = 4, period_2 = 8):
     ema_slow = closed_price.ewm(span = period_2, adjust = False).mean()
 
     ema_line = ema_fast - ema_slow
-    signal = ema_line.ewm(span = 9, adjust = False).mean()
+    signal = ema_line.ewm(span = 7, adjust = False).mean()
     histogram = ema_line - signal
 
     print("------ MACD computed !")
