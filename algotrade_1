@@ -1,0 +1,286 @@
+import math
+import pandas as pd
+import numpy as np
+from data_loader.load_data import loader
+
+#FLAGS
+first_time = True
+
+
+
+
+##############################################---- MAIN ----###############################################
+
+def my_algo(prices, cur_pos, sensitivity, capital):
+
+    if len(prices) < max(sensitivity + 30, 50):
+        return 0, 0.0
+
+
+
+    #Computing indicators
+    rsi_signal, rsi_z = rsi(prices['close'], 14)
+    macd_signal, macd_z= macd(prices['close'], 12, 26)
+    SAR_signal = parabolicSAR(prices)
+    volume_z= vol_spike(prices['volume'])
+
+    #Computing global score
+    #score = rsi_z * 0.4 + macd_z * 0.4 + volume_z * 0.2
+    current_price = prices['open'].iloc[-1]
+
+
+    #Evaluations signals
+    if (rsi_signal.iloc[-1] > 65 and macd_signal.iloc[-1]>0 and volume_z.iloc[-1] > 1 and SAR_signal == 1 ):
+        score = 1
+    
+    elif (rsi_signal.iloc[-1] < 35 and macd_signal.iloc[-1]<0 and volume_z.iloc[-1] < -1 and SAR_signal == -1 ):
+        score = -1
+    
+    else:
+        score = 0
+
+
+
+
+    #DEBUGGING help
+    print("------ DEBUG INFO ------")
+    print(f"Current price: {fmt(current_price)}")
+    print(f"RSI signal: {fmt(rsi_signal.iloc[-1])} | RSI z-score: {fmt(rsi_z.iloc[-1])}")
+    print(f"MACD signal: {fmt(macd_signal.iloc[-1])} | MACD z-score: {fmt(macd_z.iloc[-1])}")
+    print(f"Volume z-score: {fmt(volume_z.iloc[-1])}")
+    print(f"Parabolic SAR trend signal: {'UP' if SAR_signal == 1 else 'DOWN' if SAR_signal == -1 else 'UNKNOWN'}")
+    print(f"Global score: {fmt(score)}")
+    print(f"Current position: {cur_pos}")
+    print("------------------------")
+
+
+    #First initialization
+    global first_time, entry_price, stoploss, exposure, invested_capital
+    if first_time:
+        invested_capital = 0
+        exposure = 0
+        entry_price = 0
+        stoploss = 0
+        first_time = False
+    
+    #Live price
+    close_price = prices['close'].iloc[-1]
+    
+
+    #Executing the orders matching the signals
+    if cur_pos == 0:
+        
+        if score == 1:
+            #Computing exposure
+            atr = (prices['high'] - prices['low']).rolling(window=14).mean().iloc[-1]
+            exposure = min(0.2, (capital * 0.01) / (2 * atr))  # Limite à 20 %
+            
+            #Adjusting live stats
+            invested_capital = capital*exposure
+            capital = capital - invested_capital
+            entry_price = close_price
+            stoploss = 0.95 * close_price
+            
+            return 1, exposure
+        
+        if score == -1:
+            #Computing exposure
+            atr = (prices['high'] - prices['low']).rolling(window=14).mean().iloc[-1]
+            exposure = min(0.2, (capital * 0.01) / (2 * atr))  # Limite à 20 %
+            
+            #Adjusting live stats
+            invested_capital = capital*exposure
+            capital = capital - invested_capital
+            entry_price = close_price
+            stoploss = 1.05 * close_price
+
+            return -1, exposure
+    
+    if cur_pos in [1, -1]:
+        stoploss = takeprofit(cur_pos, entry_price, close_price, stoploss, seuil1=0.05, seuil2= 0.03)
+        if cur_pos == 1:
+            if score == -1 or SAR_signal == -1 or stoploss > close_price:
+                return 2, 0.2
+    
+        if cur_pos == -1:
+            if score == 1 or SAR_signal == 1 or stoploss < close_price:
+                return -2, 0.2
+        
+        return 0, 0.0  #no order 
+
+
+
+
+##########################################---- RISK MANAGEMENT ----##########################################
+
+#Dynamical allocation of StopLoss
+def takeprofit(cur_pos, entry_price, close_price, stoploss, seuil1=0.05, seuil2=0.03):
+    if cur_pos == 1:
+        profit = (close_price - entry_price) / entry_price
+        if profit > seuil1:
+            new_stop = close_price * (1 - seuil2)
+            return max(stoploss, new_stop)
+    else:
+        profit = (entry_price - close_price) / close_price
+        if profit > seuil1:
+            new_stop = close_price * (1 + seuil2)
+            return min(stoploss, new_stop)
+    return stoploss
+
+
+############################################---- INDICATORS ----############################################
+
+
+#--------------------------MACD
+def macd(closed_price, period_1 = 4, period_2 = 8):
+
+    print("------ Computing MACD indicator...")
+    
+    ema_fast = closed_price.ewm(span = period_1, adjust = False).mean()
+    ema_slow = closed_price.ewm(span = period_2, adjust = False).mean()
+
+    ema_line = ema_fast - ema_slow
+    signal = ema_line.ewm(span = 9, adjust = False).mean()
+    histogram = ema_line - signal
+
+    print("------ MACD computed !")
+
+        
+    # --- Z-SCORE COMPUTATION ---
+    window = min(30, len(histogram) // 2)
+    if window < 5:
+        window = 5
+    macd_avg = histogram.rolling(window=window).mean()
+    macd_std = histogram.rolling(window=window).std()
+    macd_z = (histogram - macd_avg) / (macd_std + 1e-8)
+    macd_z = macd_z.fillna(0)
+    return histogram, macd_z
+
+
+
+#---------------------------RSI
+
+def rsi(close_price, period=14, zscore_window=30):
+    print("------ Computing RSI indicator... ")
+
+    if len(close_price) < period:
+        print("Not enough data to compute RSI")
+        return pd.Series([50] * len(close_price), index=close_price.index), pd.Series([0] * len(close_price), index=close_price.index)
+
+    delta = close_price.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+
+    avg_gain = gain.ewm(alpha=1/period, min_periods=period, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/period, min_periods=period, adjust=False).mean()
+
+    # Use np.where to avoid division by zero
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, np.inf)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = pd.Series(rsi, index=close_price.index).fillna(50)  # Convert to Series and fill NaN
+
+    # Z-score
+    window = min(zscore_window, len(rsi) // 2)
+    if window < 5:
+        window = 5
+    if len(rsi.dropna()) >= window:
+        rsi_mean = rsi.rolling(window=window).mean()
+        rsi_std = rsi.rolling(window=window).std()
+        rsi_z = (rsi - rsi_mean) / (rsi_std + 1e-8)
+        rsi_z = rsi_z.fillna(0)
+    else:
+        print("⚠️ Not enough RSI points to compute z-score accurately")
+        rsi_z = pd.Series([0] * len(rsi), index=rsi.index)
+
+    print("------ RSI computed !")
+    return rsi, rsi_z
+
+
+
+
+#-----------------------------Parabolic SAR
+def parabolicSAR(price):
+
+    print("------ Computing parabolic SAR ...")
+    
+    # INITIALIZATION PART
+    AF = 0.02
+    maxAF = 0.2
+    trend = 'up'
+
+    SAR_list = []
+    EP_list = []
+    trend_list = []
+
+    if len(price) < 3:
+        print("------ Parabolic SAR computed !")
+        return 0
+    if ((price['close'][1] - price['close'][0]) > 0):
+        trend = 'up'
+        SAR = price['low'][1]
+        EP = price['high'][1]
+
+    else:
+        trend = 'down'
+        SAR = price['high'][1]
+        EP = price['low'][1]
+
+
+
+    # ITERATIVE PART
+    for t in range (2,len(price)):
+        
+        if trend == 'up':
+            if price['high'][t] > EP:
+                EP = price['high'][t]
+                AF = min(AF + 0.02, maxAF)
+            if SAR > price['close'].iloc[t]:
+                SAR = EP
+                EP = price['low'].iloc[t]
+                trend = 'down'
+                AF = 0.02
+
+        elif trend == 'down':
+            if price['low'][t] < EP:
+                EP = price['low'][t]
+                AF = min(AF + 0.02, maxAF)
+            if SAR < price['close'].iloc[t]:
+                SAR = EP
+                EP = price['high'].iloc[t]
+                trend = 'up'
+                AF = 0.02
+
+        SAR_list.append(SAR)
+        EP_list.append(EP)
+        trend_list.append(trend)
+
+    print("------ Parabolic SAR computed !")
+
+    if trend == 'up':
+        return 1
+    else:
+        return -1
+
+
+
+
+#--------------------------Volume Spike
+def vol_spike(volume, window=30):
+    print("------ Computing volume Z-score ...")
+
+    # Moving average and moving standart deviation of VOLUME
+    window = min(window, len(volume) // 2)
+    if window < 5:
+        window = 5
+    vol_avg = volume.rolling(window=window).mean()
+    vol_std = volume.rolling(window=window).std()
+    z_volume = (volume - vol_avg) / (vol_std + 1e-8)
+    z_volume = z_volume.fillna(0)
+    print("------ Volume Z-score computed !")
+
+    return z_volume
+
+
+
+def fmt(x):
+    return f"{x:.2f}" if pd.notnull(x) else "NaN"
